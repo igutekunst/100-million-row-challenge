@@ -114,55 +114,32 @@ final class Parser
     private function processChunk(string $inputPath, int $start, int $end): array
     {
         $result = [];
-        $subChunkSize = 200 * 1024 * 1024; // 200MB
-        $currentPos = $start;
         $handle = fopen($inputPath, 'r');
+        fseek($handle, $start);
         
-        while ($currentPos < $end) {
-            // Calculate sub-chunk boundaries
-            $subChunkEnd = min($currentPos + $subChunkSize, $end);
+        $pos = $start;
+        
+        // stream_get_line: reads until delimiter, excludes delimiter from result
+        // No newline stripping needed, cleaner code
+        while ($pos < $end && ($line = stream_get_line($handle, 256, "\n")) !== false) {
+            $lineLen = strlen($line);
+            $pos += $lineLen + 1; // +1 for the newline that was excluded
             
-            // Align to newline if not at the end
-            if ($subChunkEnd < $end) {
-                fseek($handle, $subChunkEnd);
-                fgets($handle);
-                $subChunkEnd = ftell($handle);
+            // Line format: https://stitcher.io/PATH,YYYY-MM-DDTHH:MM:SS+00:00
+            // Fixed prefix: 19 chars (https://stitcher.io)
+            // Fixed suffix: 25 chars (date) + 1 (comma) = 26 chars from end
+            $commaPos = $lineLen - 26;
+            
+            $path = substr($line, 19, $commaPos - 19);
+            $date = substr($line, $commaPos + 1, 10);
+            
+            if (!isset($result[$path])) {
+                $result[$path] = [$date => 1];
+            } elseif (!isset($result[$path][$date])) {
+                $result[$path][$date] = 1;
+            } else {
+                ++$result[$path][$date];
             }
-            
-            // Read sub-chunk into memory
-            $subChunkLength = $subChunkEnd - $currentPos;
-            fseek($handle, $currentPos);
-            $chunk = fread($handle, $subChunkLength);
-            
-            // Process with strtok (fast C-native tokenization)
-            $line = strtok($chunk, "\n");
-            
-            while ($line !== false) {
-                $lineLen = strlen($line);
-                
-                // Line format: https://stitcher.io/PATH,YYYY-MM-DDTHH:MM:SS+00:00
-                // Fixed prefix: 19 chars (https://stitcher.io)
-                // Fixed suffix: 25 chars (date) + 1 (comma) = 26 chars from end
-                $commaPos = $lineLen - 26;
-                
-                $path = substr($line, 19, $commaPos - 19);
-                $date = substr($line, $commaPos + 1, 10);
-                
-                if (!isset($result[$path])) {
-                    $result[$path] = [$date => 1];
-                } elseif (!isset($result[$path][$date])) {
-                    $result[$path][$date] = 1;
-                } else {
-                    ++$result[$path][$date];
-                }
-                
-                $line = strtok("\n");
-            }
-            
-            // Free memory before next sub-chunk
-            unset($chunk);
-            
-            $currentPos = $subChunkEnd;
         }
         
         fclose($handle);
