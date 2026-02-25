@@ -16,10 +16,14 @@ final class DataParseCommand
         string $outputPath = __DIR__ . '/../../data/data.json',
         bool $store = false,
         ?string $name = null,
+        ?int $workers = null,
     ): void {
         $startTime = microtime(true);
 
-        new Parser()->parse($inputPath, $outputPath);
+        // Allow workers to be set via environment variable
+        $workers = $workers ?? (getenv('NUM_WORKERS') ? (int)getenv('NUM_WORKERS') : null);
+
+        new Parser()->parse($inputPath, $outputPath, $workers);
 
         $endTime = microtime(true);
         $executionTime = $endTime - $startTime;
