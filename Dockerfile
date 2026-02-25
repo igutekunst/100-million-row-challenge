@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y \
     libicu-dev \
     && pecl install igbinary \
     && docker-php-ext-enable igbinary \
-    && docker-php-ext-install pcntl intl \
+    && docker-php-ext-install pcntl intl shmop sysvshm sysvsem sysvmsg \
     && apt-get purge -y $PHPIZE_DEPS \
     && apt-get autoremove -y \
     && apt-get clean \
