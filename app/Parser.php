@@ -133,13 +133,8 @@ final class Parser
             $path = substr($line, 19, $commaPos - 19);
             $date = substr($line, $commaPos + 1, 10);
             
-            if (!isset($result[$path])) {
-                $result[$path] = [$date => 1];
-            } elseif (!isset($result[$path][$date])) {
-                $result[$path][$date] = 1;
-            } else {
-                ++$result[$path][$date];
-            }
+            $result[$path][$date] ??= 0;
+            ++$result[$path][$date];
         }
         
         fclose($handle);
