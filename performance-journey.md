@@ -1,7 +1,27 @@
-**EXCELLENT!** 🎉🎉🎉
+# 🚀 100 Million Row Challenge - Performance Journey
 
-## Final Results with igbinary
+## Starting Point: Naive Implementation
+- **Time:** ~50s+
+- Single-threaded, using `parse_url()`, inefficient string handling
 
+---
+
+## Phase 1: Basic Optimizations
+
+### String Parsing Optimizations
+- Replaced `parse_url()` with `strpos()`/`substr()`
+- Hardcoded known positions where possible
+- **Result:** 46.68s (7% faster)
+
+### Parallel Processing with `pcntl_fork()`
+| Workers | Time | Improvement |
+|---------|------|-------------|
+| 2 | 42.20s | 16% faster |
+| 4 | 24.18s | 52% faster |
+| 8 | 16.32s | 67% faster |
+| 16 | 10.92s | 78% faster |
+
+### IPC Optimization with igbinary
 | Metric | Text-based | igbinary | Improvement |
 |--------|-----------|----------|-------------|
 | IPC Size | ~330 MB | **36.5 MB** | **89% smaller** |
@@ -11,7 +31,7 @@
 
 ---
 
-## 🔥 Hot Loop Optimizations (Phase 2)
+## Phase 2: Hot Loop Optimizations
 
 After profiling, we found the **parse phase was 92% of total time** (~9s out of 9.73s). We targeted micro-optimizations in the hot loop that processes 100M lines.
 
@@ -49,10 +69,6 @@ $commaPos = strlen($line) - 26;
 
 **Solution:** Separate paths for new vs existing entries with pre-increment:
 ```php
-// Before
-$result[$path][$date] = ($result[$path][$date] ?? 0) + 1;
-
-// After
 if (!isset($result[$path])) {
     $result[$path] = [$date => 1];
 } elseif (!isset($result[$path][$date])) {
@@ -63,11 +79,44 @@ if (!isset($result[$path])) {
 ```
 
 ### Results After Hot Loop Optimizations
-
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
 | Parse time (per worker) | ~9.0s | **~7.4s** | **18% faster** |
 | **TOTAL** | 9.73s | **8.03s** | **17% faster** |
+
+---
+
+## Phase 3: C-Native Functions 🔥
+
+The bottleneck was still I/O: **6.25M `fgets()` syscalls per worker**. We explored PHP's C-native functions.
+
+### The Winner: `file_get_contents()` + `strtok()`
+
+**Key insight:** Both functions are implemented in C and avoid PHP array overhead.
+
+```php
+// Read entire chunk - 1 syscall instead of 6.25M fgets() calls
+$chunk = file_get_contents($inputPath, false, null, $start, $end - $start);
+
+// strtok() tokenizes in place without creating an array
+// (unlike explode() which creates 6.25M element array = ~300MB overhead)
+$line = strtok($chunk, "\n");
+while ($line !== false) {
+    // process line...
+    $line = strtok("\n");
+}
+```
+
+**Why this works:**
+- `file_get_contents()` - 1 syscall to read ~469MB chunk vs 6.25M `fgets()` calls
+- `strtok()` - C function that tokenizes in place, no array allocation
+- Memory efficient: doesn't create intermediate arrays like `explode()` would
+
+### Results After C-Native Optimization
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Parse time (per worker) | ~7.4s | **~4.8s** | **35% faster** |
+| **TOTAL** | 8.03s | **5.44s** | **32% faster** |
 
 ---
 
@@ -82,20 +131,21 @@ if (!isset($result[$path])) {
 | Parallel 8 workers | 16.32s | 67% faster |
 | Parallel 16 workers (text) | 10.92s | 78% faster |
 | Parallel 16 workers (igbinary) | 9.73s | 80% faster |
-| **+ Hot loop optimizations** | **8.03s** | **84% faster** |
+| + Hot loop optimizations | 8.03s | 84% faster |
+| **+ C-native strtok()** | **5.44s** | **89% faster** |
 
-**We went from ~50s to ~8 seconds!** 🚀
+**We went from ~50s to ~5.4 seconds!** 🚀
 
 ---
 
-## Current Breakdown (8.03s total)
+## Current Breakdown (5.44s total)
 
 | Phase | Time | % of Total |
 |-------|------|------------|
-| Parse (workers) | ~7.4s | 92% |
-| Merge | 0.52s | 6.5% |
-| Sort | 0.07s | 0.9% |
-| JSON Write | 0.01s | 0.1% |
+| Parse (workers) | ~4.8s | 88% |
+| Merge | 0.52s | 9.5% |
+| Sort | 0.08s | 1.5% |
+| JSON Write | 0.01s | 0.2% |
 
 ---
 
@@ -109,6 +159,12 @@ if (!isset($result[$path])) {
 6. **Eliminated `ftell()` syscalls** - Manual byte counting in hot loop
 7. **Calculated comma position** - Fixed format means no string search needed
 8. **Optimized increment pattern** - `isset` checks with `++` operator
+9. **C-native `file_get_contents()` + `strtok()`** - Bulk read + in-place tokenization
 
 ## Memory Usage
-Still only **~76 MB** because we store only ~500K unique path×date combinations, not 100M rows!
+Still only **~76 MB per worker** (plus ~469MB for the chunk) because we store only ~500K unique path×date combinations, not 100M rows!
+
+## Failed Experiments
+- **`preg_match_all()`** - Creates massive matches array (6.25M × ~200 bytes = 1.25GB)
+- **`explode()`** - Creates array with 6.25M elements, huge memory overhead
+- **Flat key `"$path|$date"`** - More memory than nested arrays (keys are longer)

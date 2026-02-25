@@ -186,25 +186,23 @@ final class Parser
     private function processChunk(string $inputPath, int $start, int $end): array
     {
         $result = [];
-        $handle = fopen($inputPath, 'r');
-        fseek($handle, $start);
         
-        // Optimization #2: Track bytes read instead of calling ftell() every iteration
-        $bytesRead = 0;
-        $bytesToRead = $end - $start;
+        // Read entire chunk into memory - 1 syscall instead of millions of fgets()
+        $chunk = file_get_contents($inputPath, false, null, $start, $end - $start);
         
-        while ($bytesRead < $bytesToRead && ($line = fgets($handle)) !== false) {
+        // Use strtok (C-native) to iterate lines without creating an array
+        // strtok tokenizes in place, memory efficient
+        $line = strtok($chunk, "\n");
+        
+        while ($line !== false) {
             $lineLen = strlen($line);
-            $bytesRead += $lineLen;
             
-            // Optimization #3: Avoid strpos() - comma is always at strlen - 26
-            // Format: https://stitcher.io/PATH,YYYY-MM-DDTHH:MM:SS+00:00\n
-            // Date part is 25 chars + comma = 26 from end (before newline)
+            // Comma is always at strlen - 26 (date is fixed 25 chars + comma)
             $commaPos = $lineLen - 26;
+            
             $path = substr($line, 19, $commaPos - 19);
             $date = substr($line, $commaPos + 1, 10);
             
-            // Optimized increment pattern
             if (!isset($result[$path])) {
                 $result[$path] = [$date => 1];
             } elseif (!isset($result[$path][$date])) {
@@ -212,9 +210,13 @@ final class Parser
             } else {
                 ++$result[$path][$date];
             }
+            
+            $line = strtok("\n");
         }
         
-        fclose($handle);
+        // Free the chunk memory
+        unset($chunk);
+        
         return $result;
     }
 }
