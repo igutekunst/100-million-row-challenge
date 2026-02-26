@@ -41,7 +41,7 @@ final class DataGenerateCommand
         $uris = array_map(fn (Visit $v) => $v->uri, Visit::all());
         $uriCount = count($uris);
 
-        $now = time();
+        $now = $seed === 0 ? time() : $seed;
         $fiveYearsInSeconds = 60 * 60 * 24 * 365 * 5;
 
         $datePoolSize = 10_000;
