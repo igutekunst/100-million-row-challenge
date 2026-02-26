@@ -1,133 +1,89 @@
-# 100 Million Row Challenge - Summary for Next Thread
+# 100 Million Row Challenge — Summary
 
-## Challenge Overview
-- Parse 100M rows of CSV (page visits) into JSON
-- Benchmark server: **2 vCPUs, 1.5GB RAM**
-- PHP 8.5, no FFI allowed, JIT disabled
-- Current leaderboard: **21.9s, 23.0s, 28.3s**
-- Our best: **~26s**
+## Environment
+- Benchmark server: **Mac Mini M1, 12GB RAM**
+- PHP 8.5, OPcache available, JIT disabled, no FFI
+- Our best on leaderboard: **26.5s** (old 2-worker approach)
+- Top of leaderboard: **~3.4s**
 
 ## Current Implementation
 
-### Architecture (Dual-Path)
-```
-Memory > 2GB? → 16 workers, bulk loading (file_get_contents + strtok)
-Memory < 2GB? → 2 workers, hybrid sub-chunking (300MB chunks)
-```
+### Architecture
+- **16 parallel workers** via `pcntl_fork()`
+- Each worker reads its chunk with `file_get_contents()` (1 syscall)
+- Workers write results as packed binary (`pack('V*')`) to `/tmp`
+- Parent merges with a `for` loop on 1-indexed `unpack('V*')` arrays
+- Manual JSON building (no `json_encode`) with pre-escaped paths
 
-### Key Files
-- `app/Parser.php` - Main implementation with dual-path logic
-- `app/Commands/DataParseCommand.php` - CLI command
-- `Dockerfile` + `docker-compose.yml` - Constrained environment testing
+### Key Design Decisions
 
-### Data Format
+**Path discovery:** scan first 4MB of file to build `$pathBases` map  
+(`path => pathId * DATE_COUNT` — pre-multiplied to avoid hot-loop multiplication)
+
+**Hot loop (strpos walk):**
+```php
+while (($nl = strpos($chunk, "\n", $pos)) !== false) {
+    $base = $pathBases[substr($chunk, $pos + 19, $nl - $pos - 45)] ?? -1;
+    if ($base >= 0) {
+        ++$counts[$base + $dateIds[substr($chunk, $nl - 23, 8)]];
+    }
+    $pos = $nl + 1;
+}
+```
+- `strpos` walk avoids `strtok`'s per-line string copy (~1.49x faster)
+- All offsets derived from `$nl` directly — no `$lineLen` variable
+- `$pathBases` lookup returns pre-multiplied base, removing one multiply per hit
+- `-1` sentinel avoids `null` type check overhead
+
+**IPC (binary flat array):**
+- `pack('V*', ...$counts)` — 2.74MB per worker vs ~36MB igbinary
+- `unpack('V*')` produces 1-indexed array; merge with `for ($i=1; $i<=$N; $i++)`
+- No sorting needed — counts array is pre-indexed by date order
+
+**JSON output (manual building):**
+- Pre-escape paths once: `str_replace('/', '\/', $path)` to match `json_encode` behaviour
+- Pre-build date prefix strings once: `'        "YYYY-MM-DD": '`
+- Accumulate into one string buffer, single `file_put_contents` call
+- ~1.34x faster than `json_encode` + intermediate PHP array
+
+### Input Format
 ```
 https://stitcher.io/PATH,YYYY-MM-DDTHH:MM:SS+00:00
 ```
-- Fixed prefix: `https://stitcher.io` (19 chars)
-- Variable path length (lines vary 55-99 chars total)
-- Fixed date: 25 chars
-- We extract: `path = substr(line, 19, commaPos - 19)`, `date = substr(line, commaPos + 1, 10)`
+- Fixed prefix: 19 chars (`https://stitcher.io`)
+- Fixed suffix: 26 chars (`,` + 25-char ISO timestamp)
+- Path length = `lineLen - 45`
+- Date `YY-MM-DD` at `nl - 23` (8 chars), skipping `,20` prefix of year
 
-## Performance Journey
+### Date Encoding
+- Pre-built `$dateIds["YY-MM-DD"]` hash table (2557 entries, 2020–2026)
+- Date range is fixed; 2557 = exact day count for those 7 years
 
-| Environment | Approach | Time |
-|-------------|----------|------|
-| Mac M4 (unconstrained) | 16 workers + bulk strtok | **5.4s** |
-| Docker (2 vCPU, 1.5GB) | 2 workers + 300MB sub-chunks | **~26s** |
-| Leaderboard best | Unknown | **21.9s** |
+## Performance Journey (all on benchmark server)
 
-**Gap to close: ~4-5 seconds (26s → 21.9s)**
+| Approach | Time | Notes |
+|----------|------|-------|
+| 2 workers + `stream_get_line` + igbinary | **26.5s** | old committed code |
+| **16 workers + strpos walk + binary IPC + manual JSON** | **TBD** | current |
 
-## What We've Tried
+## What We Benchmarked and Rejected
 
-### Successful Optimizations
-1. `strpos`/`substr` instead of `parse_url()`
-2. `pcntl_fork()` for parallelization
-3. `igbinary` for IPC serialization
-4. `file_get_contents()` + `strtok()` (C-native, fast)
-5. Calculated comma position instead of `strpos()`
-6. `++$result` with `isset` checks
-7. `/dev/shm` for temp files (RAM-based tmpfs)
-8. Hybrid sub-chunking for constrained memory
+| Idea | Result |
+|------|--------|
+| `strtok` vs `strpos` walk | strpos **1.49x faster** — no per-line string copy |
+| `ymFlat` arithmetic date decode (ord() math) | **0.74x slower** — hash beats arithmetic |
+| `unpack('P')` 8-byte int date key | **0.32x slower** — unpack overhead |
+| Binary search over sorted paths | **0.34x slower** — PHP function call overhead |
+| `preg_match_all` on full chunk | OOM — too much memory |
+| `shmop` shared memory IPC | macOS shmmax=4MB limit, not viable |
+| `array_map` for merge | **0.30x slower** — closure overhead |
+| `??-1` sentinel vs `??null` | `-1` + `>= 0` is marginally faster |
+| Shorter path key (strip `/blog/`) | negligible — hash cost is not key-length-sensitive here |
+| Pre-multiplied `pathBases` (avoid `* DATE_COUNT`) | **~1.13x** — one less multiply per matched line |
+| `$nl`-based offsets (no `$lineLen` var) | **~1.14x** — one less subtraction per line |
 
-### Failed Experiments
-- `preg_match_all()` - massive memory (1.25GB for matches)
-- `explode()` - 6.25M element array overhead
-- Flat key `"$path|$date"` - more memory than nested arrays
-- Larger sub-chunks (400-500MB) - caused memory pressure
-
-## Ideas NOT Yet Tried
-
-### 1. **Pure `fgets()` Streaming** (HIGH PRIORITY)
-Our 300MB sub-chunks cause memory pressure. Pure streaming might be faster:
-- Constant ~100 byte memory per line
-- No large buffer allocation/deallocation
-- OS manages file caching efficiently
-- Hypothesis: Leaders might use this!
-
-### 2. **Shared Memory (`shmop`)** 
-Available on benchmark server! Could eliminate file I/O for IPC:
-```php
-$shm = shmop_open($key, "c", 0644, $size);
-shmop_write($shm, igbinary_serialize($result), 0);
-```
-
-### 3. **Different Worker Counts**
-- Try 3-4 workers instead of 2
-- Better CPU/IO overlap with I/O-bound workload
-
-### 4. **Merge Optimization**
-- Current merge is ~0.04s with `/dev/shm`
-- Could merge in parallel or use different data structure
-
-## Docker Testing Commands
-
-```bash
-# Build and run in constrained environment
-docker compose build
-docker compose run --rm -T parser
-
-# Run multiple benchmarks
-for i in 1 2 3; do docker compose run --rm -T parser 2>&1 | grep "TOTAL:"; done
-```
-
-## Key Code Locations
-
-### Parser.php - Constrained Detection
-```php
-$isConstrained = $memoryLimit > 256 * 1024 * 1024 && $memoryLimit < 2 * 1024 * 1024 * 1024;
-$numWorkers = $isConstrained ? 2 : 16;
-```
-
-### Parser.php - Sub-chunk Processing
-```php
-private function processChunkHybrid(string $inputPath, int $start, int $end, int $subChunkSize): array
-```
-
-### Parser.php - Bulk Processing  
-```php
-private function processChunkBulk(string $inputPath, int $start, int $end): array
-```
-
-## Available Extensions on Benchmark Server
-```
-igbinary, pcntl, shmop, sysvsem, sysvshm, sysvmsg, msgpack, memcached, redis
-```
-
-## Next Steps (Priority Order)
-
-1. **Try pure `fgets()` streaming** - Might be faster due to less memory pressure
-2. **Implement `shmop` for IPC** - Eliminate temp file I/O
-3. **Test 3-4 workers** - Better parallelism with I/O overlap
-4. **Profile memory usage** - Understand where pressure comes from
-
-## Quick Benchmark Reference
-
-```bash
-# Native Mac (unconstrained)
-/opt/homebrew/Cellar/php/8.5.3/bin/php -d memory_limit=-1 tempest data:parse
-
-# Docker (constrained)
-docker compose run --rm -T parser
-```
+## Files
+- `app/Parser.php` — main implementation
+- `app/Commands/DataParseCommand.php` — CLI entry point (`php tempest data:parse`)
+- `bench_merge.php` — merge + JSON output strategy benchmarks
+- `bench_hotloop.php` — hot loop variant benchmarks
