@@ -112,12 +112,12 @@ All entries must be submitted before March 16, 2026 (so you have until March 15,
 - One Tideways Elephpant
 - One-year JetBrains all-products pack license
 
- **🚂 fastest single-core submission**:
+ **🚂 Fastest single-core submission**:
 
 - One PhpStorm Elephpant
 - One-year JetBrains all-products pack license
 
-**🏅 participation prize**:
+**🏅 Participation prize**:
 
 A random winner picked from all entries will get:
 
