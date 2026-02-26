@@ -2,7 +2,8 @@
 
 ## Environment
 - Benchmark server: **Mac Mini M1, 12GB RAM**
-- PHP 8.5, OPcache available, JIT disabled, no FFI
+- PHP 8.5, JIT disabled, no FFI
+- `Zend OPcache` extension is listed as available, but OPcache is typically disabled for CLI by default — unconfirmed whether it's active on the benchmark server
 - Our best on leaderboard: **26.5s** (old 2-worker approach)
 - Top of leaderboard: **~3.4s**
 
