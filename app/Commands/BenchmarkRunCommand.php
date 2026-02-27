@@ -94,7 +94,22 @@ final class BenchmarkRunCommand
 
             try {
                 $result = $this->processPR($prData);
-                $this->addLeaderboardResult($prNumber, $prTitle, $result);
+                $this->addLeaderboardResult('leaderboard.csv', $prNumber, $prTitle, $result);
+
+                $isSingleThread = false;
+
+                foreach ($prData['labels'] ?? [] as $label) {
+                    $isSingleThread = $label['name'] === '🚂 single thread';
+                    if ($isSingleThread) {
+                        break;
+                    }
+                }
+
+                if ($isSingleThread) {
+                    $this->addLeaderboardResult('leaderboard-single-thread.csv', $prNumber, $prTitle, $result);
+                }
+
+
                 $this->githubRemoveLabel($prNumber, 'bench_needed');
             } finally {
                 // Always remove the verified label
@@ -339,31 +354,28 @@ final class BenchmarkRunCommand
         return $meanTime;
     }
 
-    private function addLeaderboardResult(int $prNumber, string $branch, ?float $newTime): void
+    private function addLeaderboardResult(string $file, int $prNumber, string $branch, ?float $newTime): void
     {
         if (! $newTime) {
-            return;
-        }
-
-        if (! $this->persist) {
-            $this->prWarning($prNumber, "Skipping leaderboard update as --persist is not enabled.");
             return;
         }
 
         // Pull from main
         $repoDir = __DIR__ . '/../..';
 
-        $gitPull = "cd " . escapeshellarg($repoDir) . " && git pull origin main";
-        $this->prLine($prNumber, $gitPull);
-        exec($gitPull, $output, $returnCode);
+        if ($this->persist) {
+            $gitPull = "cd " . escapeshellarg($repoDir) . " && git pull origin main";
+            $this->prLine($prNumber, $gitPull);
+            exec($gitPull, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Git pull failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prError($prNumber, "Git pull failed");
+                return;
+            }
         }
 
         // Update leaderboard
-        $path = __DIR__ . '/../../leaderboard.csv';
+        $path = __DIR__ . '/../../' . $file;
         $handle = fopen($path, 'r');
         $data = [];
 
@@ -411,7 +423,7 @@ final class BenchmarkRunCommand
             }
         }
 
-        if (!isset($data[$branch])) {
+        if (! isset($data[$branch])) {
             $data[$branch] = [
                 'submissionTime' => time(),
                 'branch' => $branch,
@@ -435,36 +447,44 @@ final class BenchmarkRunCommand
         file_put_contents($path, $leaderboard);
 
         // Add changes
-        $gitAdd = "cd " . escapeshellarg($repoDir) . " && git add leaderboard.csv";
-        $this->prLine($prNumber, $gitAdd);
-        exec($gitAdd, $output, $returnCode);
+        if ($this->persist) {
+            $gitAdd = "cd " . escapeshellarg($repoDir) . " && git add " . escapeshellarg($file);
+            $this->prLine($prNumber, $gitAdd);
+            exec($gitAdd, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prWarning($prNumber, "Git add failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prWarning($prNumber, "Git add failed");
+                return;
+            }
         }
 
         // Commit changes
-        $gitCommit = "cd " . escapeshellarg($repoDir) . " && git commit -m 'Update leaderboard'";
-        $this->prLine($prNumber, $gitCommit);
-        exec($gitCommit, $output, $returnCode);
+        if ($this->persist) {
+            $gitCommit = "cd " . escapeshellarg($repoDir) . " && git commit -m 'Update leaderboard'";
+            $this->prLine($prNumber, $gitCommit);
+            exec($gitCommit, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Nothing to commit");
-            return;
+            if ($returnCode !== 0) {
+                $this->prError($prNumber, "Nothing to commit");
+                return;
+            }
         }
 
         // Push changes
-        $gitPush = "cd " . escapeshellarg($repoDir) . " && git push";
-        $this->prLine($prNumber, $gitPush);
-        exec($gitPush, $output, $returnCode);
+        if ($this->persist) {
+            $gitPush = "cd " . escapeshellarg($repoDir) . " && git push";
+            $this->prLine($prNumber, $gitPush);
+            exec($gitPush, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Git push failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prError($prNumber, "Git push failed");
+                return;
+            }
+        } else {
+            $this->prWarning($prNumber, "Skipping leaderboard update as --persist is not enabled.");
         }
 
-        $this->prSuccess($prNumber, "Leaderboard updated!");
+        $this->prSuccess($prNumber, "{$file} updated!");
     }
 
     private function prLine(int $prNumber, string $message): void
