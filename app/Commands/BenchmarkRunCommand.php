@@ -63,7 +63,9 @@ final class BenchmarkRunCommand
                     $this->error($e->getMessage());
                 }
 
-                $this->warning('Sleeping for 10 seconds…');
+                $memory = memory_get_usage(true);
+                $formattedMemory = number_format($memory / 1024 / 1024, 2) . 'MB';
+                $this->writeWithTimestamp("<style=\"fg-blue\">[{$formattedMemory}]</style> Sleeping for 10 seconds…");
                 sleep(10);
             }
         } else {
@@ -94,7 +96,22 @@ final class BenchmarkRunCommand
 
             try {
                 $result = $this->processPR($prData);
-                $this->addLeaderboardResult($prNumber, $prTitle, $result);
+                $this->addLeaderboardResult('leaderboard.csv', $prNumber, $prTitle, $result);
+
+                $isSingleThread = false;
+
+                foreach ($prData['labels'] ?? [] as $label) {
+                    $isSingleThread = $label['name'] === '🚂 single thread';
+                    if ($isSingleThread) {
+                        break;
+                    }
+                }
+
+                if ($isSingleThread) {
+                    $this->addLeaderboardResult('leaderboard-single-thread.csv', $prNumber, $prTitle, $result);
+                }
+
+
                 $this->githubRemoveLabel($prNumber, 'bench_needed');
             } finally {
                 // Always remove the verified label
@@ -234,7 +251,7 @@ final class BenchmarkRunCommand
         $benchmarkDir = __DIR__ . '/../../.benchmark/pr-' . $prNumber;
 
         if (is_dir($benchmarkDir)) {
-            $this->prLine($prNumber, "Removing existing benchmark directory...");
+            $this->prLine($prNumber, "Removing existing benchmark directory…");
             exec("rm -rf " . escapeshellarg($benchmarkDir));
         }
 
@@ -261,13 +278,13 @@ final class BenchmarkRunCommand
         $resultFile = __DIR__ . '/../../.benchmark/result-' . $prNumber . '.json';
         $actualPath = __DIR__ . '/../../data/real-data-actual.json';
         $parseCommand = sprintf(
-            './tempest data:parse --input-path="%s" --output-path="%s"',
+            'php -dmax_execution_time=300 tempest data:parse --input-path="%s" --output-path="%s"',
             escapeshellarg(__DIR__ . '/../../data/real-data.csv'),
             escapeshellarg($actualPath),
         );
 
         $command = sprintf(
-            "hyperfine --warmup 0 --runs 1 --export-json %s 'cd %s && %s'",
+            "hyperfine --warmup 0 --runs 1 --show-output --export-json %s 'cd %s && %s'",
             escapeshellarg($resultFile),
             escapeshellarg($benchmarkDir),
             $parseCommand,
@@ -278,8 +295,21 @@ final class BenchmarkRunCommand
         exec($command, $output, $returnCode);
 
         if ($returnCode !== 0 || ! file_exists($resultFile)) {
+            $cleanedOutput = implode(PHP_EOL, preg_replace(
+                '/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -\/]*[@-~])/',
+                '',
+                $output
+            ));
+
             $this->prError($prNumber, "Failed to run benchmark");
-            $this->githubComment($prNumber, 'Benchmarking failed');
+            $this->githubComment($prNumber, <<<MD
+            Failed to run benchmark:
+            
+            ```
+            $cleanedOutput
+            ```
+            MD);
+
             return null;
         }
 
@@ -293,7 +323,7 @@ final class BenchmarkRunCommand
             return null;
         }
 
-        if ($meanTime < 10) {
+        if ($meanTime < 20) {
             // Second run for fast PRs
             $command = sprintf(
                 "hyperfine --warmup 2 --runs 5 --export-json %s 'cd %s && %s'",
@@ -339,31 +369,28 @@ final class BenchmarkRunCommand
         return $meanTime;
     }
 
-    private function addLeaderboardResult(int $prNumber, string $branch, ?float $newTime): void
+    private function addLeaderboardResult(string $file, int $prNumber, string $branch, ?float $newTime): void
     {
         if (! $newTime) {
-            return;
-        }
-
-        if (! $this->persist) {
-            $this->prWarning($prNumber, "Skipping leaderboard update as --persist is not enabled.");
             return;
         }
 
         // Pull from main
         $repoDir = __DIR__ . '/../..';
 
-        $gitPull = "cd " . escapeshellarg($repoDir) . " && git pull origin main";
-        $this->prLine($prNumber, $gitPull);
-        exec($gitPull, $output, $returnCode);
+        if ($this->persist) {
+            $gitPull = "cd " . escapeshellarg($repoDir) . " && git pull origin main";
+            $this->prLine($prNumber, $gitPull);
+            exec($gitPull, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Git pull failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prError($prNumber, "Git pull failed");
+                return;
+            }
         }
 
         // Update leaderboard
-        $path = __DIR__ . '/../../leaderboard.csv';
+        $path = __DIR__ . '/../../' . $file;
         $handle = fopen($path, 'r');
         $data = [];
 
@@ -401,7 +428,7 @@ final class BenchmarkRunCommand
                     "You didn’t optimize. You *performed violence* (on latency). 🔪",
                 ];
 
-                $this->githubComment($prNumber, $messages[array_rand($messages)]);
+                $this->githubComment($prNumber, $messages[array_rand($messages)] . "<br>🏆 [{$file}](https://github.com/tempestphp/100-million-row-challenge/blob/main/{$file})");
             } else {
                 $data[$currentBranch] = [
                     'submissionTime' => $submissionTime,
@@ -411,7 +438,7 @@ final class BenchmarkRunCommand
             }
         }
 
-        if (!isset($data[$branch])) {
+        if (! isset($data[$branch])) {
             $data[$branch] = [
                 'submissionTime' => time(),
                 'branch' => $branch,
@@ -435,60 +462,75 @@ final class BenchmarkRunCommand
         file_put_contents($path, $leaderboard);
 
         // Add changes
-        $gitAdd = "cd " . escapeshellarg($repoDir) . " && git add leaderboard.csv";
-        $this->prLine($prNumber, $gitAdd);
-        exec($gitAdd, $output, $returnCode);
+        if ($this->persist) {
+            $gitAdd = "cd " . escapeshellarg($repoDir) . " && git add " . escapeshellarg($file);
+            $this->prLine($prNumber, $gitAdd);
+            exec($gitAdd, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prWarning($prNumber, "Git add failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prWarning($prNumber, "Git add failed");
+                return;
+            }
         }
 
         // Commit changes
-        $gitCommit = "cd " . escapeshellarg($repoDir) . " && git commit -m 'Update leaderboard'";
-        $this->prLine($prNumber, $gitCommit);
-        exec($gitCommit, $output, $returnCode);
+        if ($this->persist) {
+            $gitCommit = "cd " . escapeshellarg($repoDir) . " && git commit -m 'Update leaderboard'";
+            $this->prLine($prNumber, $gitCommit);
+            exec($gitCommit, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Nothing to commit");
-            return;
+            if ($returnCode !== 0) {
+                $this->prWarning($prNumber, "Nothing to commit");
+                return;
+            }
         }
 
         // Push changes
-        $gitPush = "cd " . escapeshellarg($repoDir) . " && git push";
-        $this->prLine($prNumber, $gitPush);
-        exec($gitPush, $output, $returnCode);
+        if ($this->persist) {
+            $gitPush = "cd " . escapeshellarg($repoDir) . " && git push";
+            $this->prLine($prNumber, $gitPush);
+            exec($gitPush, $output, $returnCode);
 
-        if ($returnCode !== 0) {
-            $this->prError($prNumber, "Git push failed");
-            return;
+            if ($returnCode !== 0) {
+                $this->prError($prNumber, "Git push failed");
+                return;
+            }
+        } else {
+            $this->prWarning($prNumber, "Skipping leaderboard update as --persist is not enabled.");
         }
 
-        $this->prSuccess($prNumber, "Leaderboard updated!");
+        $this->prSuccess($prNumber, "{$file} updated!");
     }
 
     private function prLine(int $prNumber, string $message): void
     {
-        $this->writeln("<style=\"fg-blue\">[#$prNumber]</style> $message");
+        $this->writeWithTimestamp("<style=\"fg-blue\">[#$prNumber]</style> $message");
     }
 
     private function prInfo(int $prNumber, string $message): void
     {
-        $this->writeln("<style=\"bold fg-blue\">[#$prNumber] $message</style>");
+        $this->writeWithTimestamp("<style=\"bold fg-blue\">[#$prNumber] $message</style>");
     }
 
     private function prSuccess(int $prNumber, string $message): void
     {
-        $this->writeln("<style=\"bold fg-green\">[#$prNumber] $message</style>");
+        $this->writeWithTimestamp("<style=\"bold fg-green\">[#$prNumber] $message</style>");
     }
 
     private function prError(int $prNumber, string $message): void
     {
-        $this->writeln("<style=\"bold fg-red\">[#$prNumber] $message</style>");
+        $this->writeWithTimestamp("<style=\"bold fg-red\">[#$prNumber] $message</style>");
     }
 
     private function prWarning(int $prNumber, string $message): void
     {
-        $this->writeln("<style=\"bold fg-yellow\">[#$prNumber] $message</style>");
+        $this->writeWithTimestamp("<style=\"bold fg-yellow\">[#$prNumber] $message</style>");
+    }
+
+    private function writeWithTimestamp(string $message): void
+    {
+        $time = date('Y-m-d H:i:s');
+
+        $this->writeln("<style=\"dim\">[{$time}]</style> {$message}");
     }
 }
